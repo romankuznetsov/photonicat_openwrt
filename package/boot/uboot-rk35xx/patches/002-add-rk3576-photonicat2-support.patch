@@ -24,9 +24,9 @@
 +&sdhci {
 +	bus-width = <8>;
 +	full-pwr-cycle-in-suspend;
-+	max-frequency = <150000000>;
-+	mmc-hs400-1_8v;
-+	mmc-hs400-enhanced-strobe;
++	max-frequency = <52000000>;
++	mmc-hs200-1_8v;
++	/* mmc-hs400-enhanced-strobe; */
 +
 +	/delete-property/ supports-cqe;
 +
@@ -640,7 +640,7 @@
 +# CONFIG_CMD_IMLS is not set
 +# CONFIG_CMD_XIMG is not set
 +# CONFIG_CMD_LZMADEC is not set
-+# CONFIG_CMD_UNZIP is not set
++CONFIG_CMD_UNZIP=y
 +# CONFIG_CMD_FLASH is not set
 +# CONFIG_CMD_FPGA is not set
 +CONFIG_CMD_GPIO=y

@@ -214,7 +214,6 @@
 
 	backlight: backlight {
 		compatible = "pwm-backlight";
-		power-supply = <&vcc_5v0_sys>;
 		pwms = <&pwm2_8ch_2 0 25000 PWM_POLARITY_INVERTED>;
 		brightness-levels = <
 			  0   1   2   3   4   5   6   7
@@ -907,9 +906,8 @@
 &sdhci {
 	bus-width = <8>;
 	full-pwr-cycle-in-suspend;
-	max-frequency = <100000000>;
-	mmc-hs400-1_8v;
-	mmc-hs400-enhanced-strobe;
+	max-frequency = <52000000>;
+	mmc-hs200-1_8v;
 	/delete-property/ supports-cqe;
 	no-sdio;
 	no-sd;
@@ -921,6 +919,15 @@
 	bus-width = <4>;
 	cap-mmc-highspeed;
 	cap-sd-highspeed;
+	/*
+	 * The card detect switch (J4200 pin 9 -> SDMMC0_DET_L) reaches the SoC on
+	 * GPIO0_A7, and rk3576.dtsi already muxes that pin as SDMMC0_DETN, but the
+	 * controller never raises a detect interrupt from it: pulling a card leaves
+	 * mmcblk1, the mmc1:0001 card object and the mount in place, and the only
+	 * sign of the removal is an endless stream of "I/O error, dev mmcblk1".
+	 * Poll the slot instead so removal is noticed within a second.
+	 */
+	broken-cd;
 	disable-wp;
 	max-frequency = <200000000>;
 	no-sdio;
@@ -1023,7 +1030,22 @@
 	spidev@0 {
 		compatible = "micron,spi-authenta";
 		reg = <0>;
-		spi-max-frequency = <6000000>; 
+		/*
+		 * GC9307 mini display panel. The SPI controller clock (spi1) is
+		 * 198 MHz; the baud divider is even with a minimum of 2, so the
+		 * achievable SCLK rates are 99 MHz (/2), 49.5 MHz (/4), etc. The
+		 * stock rockchip driver caps SCLK at 50 MHz (MAX_SCLK_OUT), which
+		 * forces the /4 divider (~49.5 MHz) and pins full-frame
+		 * (172x266) writes at ~16 ms (~61 fps).
+		 *
+		 * Patch 380-spi-rockchip-raise-max-sclk-out.patch lifts that cap
+		 * to 100 MHz. Requesting 100 MHz here then resolves to the /2
+		 * divider = 99 MHz, roughly doubling display throughput. Must be
+		 * >= 99 MHz to select /2 (a request like 80 MHz would fall back
+		 * to /4). Drop back to 50000000 if the panel shows artifacts at
+		 * 99 MHz.
+		 */
+		spi-max-frequency = <100000000>;
 	};
 };
 
