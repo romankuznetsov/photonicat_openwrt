@@ -3,3 +3,9 @@ src-git luci https://github.com/photonicat/rockchip_rk3568_openwrt_luci.git;open
 src-git routing https://github.com/photonicat/rockchip_rk3568_openwrt_routing.git;openwrt-25.12
 src-git telephony https://github.com/photonicat/rockchip_rk3568_openwrt_telephony.git;openwrt-25.12
 src-git video https://github.com/photonicat/rockchip_rk3568_openwrt_video.git;openwrt-25.12
+# AmneziaWG. Not in any photonicat feed and not in ImmortalWrt's either, and
+# the prebuilt releases cannot be used here: the 24.10.x .ipk carry a 6.6.144
+# kmod against this device's 6.12.91, and the 25.12.x builds are .apk, which
+# this firmware's opkg cannot read. Building it in-tree is what gets a module
+# whose vermagic matches the running kernel.
+src-git awg https://github.com/Slava-Shchipunov/awg-openwrt.git

@@ -16,6 +16,14 @@ on:
         description: which file under configs/ to build
         default: photonicat2_base_defconfig
         type: string
+      scope:
+        description: >-
+          awg = toolchain, kernel and the AmneziaWG packages only (~2h30m).
+          full = the whole 1776-package world and an image, which does not
+          reliably fit a 4-core runner inside the 6h ceiling.
+        default: awg
+        type: choice
+        options: [awg, full]
       skip_node:
         description: >-
           drop the 12 node packages (all =m, absent from the image) -- they
@@ -107,6 +115,15 @@ jobs:
             echo "node packages disabled: $(grep -cE '^# CONFIG_PACKAGE_node(-| )' .config)"
           fi
 
+          if [ "${{ inputs.scope }}" = "awg" ]; then
+            # The three AmneziaWG packages, as modules: they are installed on
+            # the running device with opkg, not baked into an image.
+            for p in kmod-amneziawg amneziawg-tools luci-proto-amneziawg; do
+              sed -i -E "/^(# )?CONFIG_PACKAGE_$p( is not set|=.*)\$/d" .config
+              echo "CONFIG_PACKAGE_$p=m" >> .config
+            done
+          fi
+
           make defconfig
           echo "::group::resolved target"
           grep -E '^CONFIG_TARGET_(BOARD|SUBTARGET|PROFILE|ARCH_PACKAGES)=' .config
@@ -134,6 +151,22 @@ jobs:
             exit 1
           fi
 
+          if [ "${{ inputs.scope }}" = "awg" ]; then
+            # defconfig drops a symbol whose package the feeds never installed,
+            # and does it silently. Without this check the build would run for
+            # two hours and then produce no amneziawg at all, which looks like
+            # a packaging mystery rather than a missing feed.
+            missing=
+            for p in kmod-amneziawg amneziawg-tools luci-proto-amneziawg; do
+              grep -q "^CONFIG_PACKAGE_$p=m\$" .config || missing="$missing $p"
+            done
+            if [ -n "$missing" ]; then
+              echo "::error::defconfig dropped:$missing -- the awg feed did not install"
+              exit 1
+            fi
+            echo "amneziawg packages selected: kmod, tools, luci-proto"
+          fi
+
       - name: Download sources
         working-directory: /mnt/build/openwrt
         run: |
@@ -150,14 +183,46 @@ jobs:
       - name: Build
         working-directory: /mnt/build/openwrt
         run: |
-          if [ "${{ inputs.verbose }}" = "true" ]; then
-            make -j1 V=s
-          else
-            make -j"$(nproc)" || {
-              echo "::warning::parallel build failed, retrying single-threaded for a readable error"
-              make -j1 V=s
-            }
+          j=$(nproc)
+          V=
+          if [ "${{ inputs.verbose }}" = "true" ]; then j=1; V=V=s; fi
+
+          if [ "${{ inputs.scope }}" = "full" ]; then
+            if make -j"$j" $V; then
+              exit 0
+            fi
+            echo "::warning::parallel build failed, retrying single-threaded for a readable error"
+            exec make -j1 V=s
           fi
+
+          # Staged rather than one 'make package/.../compile' so that a failure
+          # is attributable. Run 37610731481 measured these: tools 1h22m,
+          # toolchain 23m, kernel 28m. The packages themselves are minutes.
+          echo "::group::tools and toolchain"
+          make -j"$j" tools/install toolchain/install
+          echo "::endgroup::"
+
+          echo "::group::kernel"
+          # kmod-amneziawg links against this exact kernel; its vermagic is
+          # what decides whether the module loads on the stock vendor image.
+          make -j"$j" target/compile
+          echo "::endgroup::"
+
+          echo "::group::amneziawg"
+          make -j"$j" \
+            package/kmod-amneziawg/compile \
+            package/amneziawg-tools/compile \
+            package/luci-proto-amneziawg/compile
+          make -j"$j" package/index
+          echo "::endgroup::"
+
+          echo "::group::vermagic of the built module"
+          # The whole point of building in-tree. This must match what
+          # 'modinfo wireguard.ko' reports on the device: 6.12.91 SMP preempt
+          # mod_unload aarch64.
+          find build_dir -name 'amneziawg.ko' -exec sh -c \
+            'echo "$1"; strings "$1" | grep -m1 ^vermagic=' _ {} \;
+          echo "::endgroup::"
 
       - name: Summarise output
         if: always()
@@ -173,11 +238,14 @@ jobs:
           find bin/packages -name '*.ipk' -o -name '*.apk' 2>/dev/null | wc -l
           echo "::endgroup::"
 
-      - name: Upload images
+      - name: Upload target output
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: images
+          # Not just images: kernel modules land in bin/targets/<t>/<s>/packages/,
+          # so in 'awg' scope this is the artifact holding kmod-amneziawg, and
+          # there is no image in it at all.
+          name: targets
           path: /mnt/build/openwrt/bin/targets/**
           if-no-files-found: warn
           retention-days: 14
