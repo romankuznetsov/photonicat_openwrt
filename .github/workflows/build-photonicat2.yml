@@ -16,6 +16,12 @@ on:
         description: which file under configs/ to build
         default: photonicat2_base_defconfig
         type: string
+      skip_node:
+        description: >-
+          drop the 12 node packages (all =m, absent from the image) -- they
+          cost over 2.5h of host V8 compilation
+        default: true
+        type: boolean
       verbose:
         description: build single-threaded with V=s (slow, readable logs)
         default: false
@@ -35,25 +41,14 @@ jobs:
     timeout-minutes: 345
 
     steps:
-      - name: Reclaim disk space
-        run: |
-          echo "::group::before"
-          df -h / /mnt
-          echo "::endgroup::"
-          sudo rm -rf \
-            /usr/share/dotnet \
-            /usr/local/lib/android \
-            /opt/ghc \
-            /usr/local/.ghcup \
-            /usr/share/swift \
-            /usr/local/share/powershell \
-            /usr/share/miniconda \
-            /opt/hostedtoolcache/CodeQL || true
-          sudo docker system prune -af || true
-          sudo apt-get clean
-          echo "::group::after"
-          df -h / /mnt
-          echo "::endgroup::"
+      - name: Report disk space
+        # Run 37610731481 settled this: the runner has 145 GB with 86 GB free
+        # before any cleanup, and the whole build used 29 GB. The usual
+        # incantation that deletes /usr/share/dotnet and friends is pure
+        # superstition here -- it cost 100 seconds and freed space nothing
+        # needed. Left as a report so a future change in runner sizing is
+        # visible rather than mysterious.
+        run: df -h / /mnt
 
       - name: Install build dependencies
         run: |
@@ -97,6 +92,21 @@ jobs:
           cfg="configs/${{ inputs.defconfig }}"
           test -f "$cfg" || { echo "no such config: $cfg"; ls configs/; exit 1; }
           cp "$cfg" .config
+
+          if [ "${{ inputs.skip_node }}" != "false" ]; then
+            # Node.js is the single most expensive thing in this tree. In run
+            # 37610731481 it unpacked at 14:12:58 and was still compiling V8
+            # when the job was cancelled at 16:42 -- 2h29m, against 3h13m for
+            # everything else put together, and it had not finished.
+            #
+            # All 12 node packages are '=m': built as .ipk, not installed in
+            # the image. Dropping them therefore cannot change the firmware,
+            # only which extra .ipk files land in bin/packages. The assertion
+            # below is what makes that claim checkable rather than a promise.
+            sed -i -E 's/^(CONFIG_PACKAGE_node(-[^=]*)?)=[ym]$/# \1 is not set/' .config
+            echo "node packages disabled: $(grep -cE '^# CONFIG_PACKAGE_node(-| )' .config)"
+          fi
+
           make defconfig
           echo "::group::resolved target"
           grep -E '^CONFIG_TARGET_(BOARD|SUBTARGET|PROFILE|ARCH_PACKAGES)=' .config
@@ -104,10 +114,25 @@ jobs:
           echo "::endgroup::"
           # defconfig silently drops symbols whose dependencies are missing,
           # which is how a build ends up quietly not containing what was asked
-          # for. Print both counts so a large gap is visible in the log.
+          # for. Run 37610731481 had 1776 -> 1776, so the vendor config is
+          # fully satisfiable; a gap here means something has since broken.
           before=$(grep -c '^CONFIG_PACKAGE_.*=[ym]' "$cfg")
           after=$(grep -c '^CONFIG_PACKAGE_.*=[ym]' .config)
           echo "packages selected: $before in configs/, $after after defconfig"
+
+          # The image is exactly the '=y' set. Asserting it is unchanged is
+          # what proves skip_node cost nothing: if dropping node ever removes
+          # something from the firmware, this fails instead of shipping a
+          # quietly different image.
+          want=$(grep -c '^CONFIG_PACKAGE_.*=y' "$cfg")
+          got=$(grep -c '^CONFIG_PACKAGE_.*=y' .config)
+          echo "in-image packages: $want in configs/, $got after defconfig"
+          if [ "$want" != "$got" ]; then
+            echo "::error::in-image package count changed ($want -> $got); the image would differ"
+            diff <(grep '^CONFIG_PACKAGE_.*=y' "$cfg" | sort) \
+                 <(grep '^CONFIG_PACKAGE_.*=y' .config | sort) || true
+            exit 1
+          fi
 
       - name: Download sources
         working-directory: /mnt/build/openwrt
